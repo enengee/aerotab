@@ -27,6 +27,11 @@ With one window the popup still appears.
   - If it is hidden somewhere else (for example, behind another window in the other column), focusing it brings it
     forward. The previously focused window is not affected.
 
+Before asking AeroSpace to focus a window, AeroTab focuses that exact window itself. It uses the same private SkyLight
+calls as AltTab (`_SLPSSetFrontProcessWithOptions` plus a key-window event), followed by an Accessibility raise.
+Without this step, focusing one window of an app that has another window visible on a different monitor (for
+example, two Chrome windows) lets macOS activate the app's other window, and AeroSpace follows it there.
+
 ## How it is fast
 
 - **Long-running agent:** a single process with no Dock icon and no menu bar item. No shell scripts or processes are
