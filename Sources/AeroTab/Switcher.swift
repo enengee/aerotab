@@ -153,11 +153,14 @@ final class Switcher {
     private func finishCommit() {
         guard let item = selectedItem else { return end() }
         let picked = item.window.id
+        let pid = item.window.pid
         let focused = focused
         let windows = items?.map(\.window) ?? []
         end()
         AeroSpace.queue.async {
             let commands = commitCommands(picked: picked, focused: focused, windows: windows, stack: WindowStack.onScreen())
+            guard !commands.isEmpty else { return }
+            NativeFocus.focus(picked, pid: pid)
             do { try AeroSpace.eval(commands) } catch { log("commit: \(error)") }
         }
     }
