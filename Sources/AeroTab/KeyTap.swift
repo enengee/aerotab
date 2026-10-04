@@ -47,7 +47,7 @@ final class KeyTap {
             if swallowedKeyUps.remove(code) != nil || switcher.isActive { return nil }
             return Unmanaged.passUnretained(event)
         case .flagsChanged:
-            if switcher.isActive, !event.flags.contains(.maskAlternate) { switcher.commit() }
+            if switcher.isActive, !event.flags.contains(switcher.mode.modifier) { switcher.commit() }
             return Unmanaged.passUnretained(event)
         default:
             return Unmanaged.passUnretained(event)
@@ -60,10 +60,12 @@ final class KeyTap {
         let shift = flags.contains(.maskShift)
 
         if !switcher.isActive {
-            let plainAlt = flags.contains(.maskAlternate) && !flags.contains(.maskCommand) && !flags.contains(.maskControl)
-            guard plainAlt, code == kVK_Tab else { return false }
+            guard code == kVK_Tab, !flags.contains(.maskControl) else { return false }
+            let alt = flags.contains(.maskAlternate)
+            let command = flags.contains(.maskCommand)
+            guard alt != command else { return false }
             swallowedKeyUps.insert(code)
-            switcher.begin(backward: shift)
+            switcher.begin(alt ? .workspace : .global, backward: shift)
             return true
         }
 
@@ -73,6 +75,9 @@ final class KeyTap {
         case kVK_RightArrow: switcher.step(1)
         case kVK_LeftArrow: switcher.step(-1)
         case kVK_Escape: switcher.cancel()
+        case kVK_ANSI_Grave where switcher.mode == .global: switcher.jumpWorkspace(forward: !shift)
+        case kVK_DownArrow where switcher.mode == .global: switcher.jumpWorkspace(forward: true)
+        case kVK_UpArrow where switcher.mode == .global: switcher.jumpWorkspace(forward: false)
         case kVK_ANSI_W: switcher.closeSelected()
         case kVK_ANSI_Q: switcher.quitSelectedApp()
         default: break

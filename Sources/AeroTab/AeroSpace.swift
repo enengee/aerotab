@@ -1,10 +1,11 @@
 import AeroTabCore
 import Foundation
 
-struct WorkspaceSnapshot {
+struct WindowSnapshot {
     let focused: UInt32?
-    let windows: [WorkspaceWindow]
+    let focusedWorkspace: String?
     let screenIndex: Int?
+    let windows: [WorkspaceWindow]
 }
 
 enum AeroSpace {
@@ -23,26 +24,42 @@ enum AeroSpace {
         _ = try run(["eval", commands.joined(separator: "; ")])
     }
 
-    static func snapshot() throws -> WorkspaceSnapshot {
-        let format = "%{window-id} %{app-pid} %{app-name} %{window-title} %{window-layout} %{monitor-appkit-nsscreen-screens-id}"
-        let answer = try run(["eval", "list-windows --focused --format '%{window-id}'; list-windows --workspace focused --json --format '\(format)'"])
-        guard let listStart = answer.stdout.firstIndex(of: "[") else {
-            throw AeroSpaceError(description: "unexpected list-windows output: \(answer.stdout)")
+    static func snapshot(allWorkspaces: Bool) throws -> WindowSnapshot {
+        let format = "%{window-id} %{app-pid} %{app-name} %{window-title} %{window-layout} %{workspace}"
+        let scope = allWorkspaces ? "--all" : "--workspace focused"
+        let answer = try run(["eval", """
+            list-windows --focused --format '%{window-id}'; \
+            list-workspaces --focused --format '%{workspace}%{tab}%{monitor-appkit-nsscreen-screens-id}'; \
+            list-windows \(scope) --json --format '\(format)'
+            """])
+        let stdout = answer.stdout
+        guard let listStart = stdout.hasPrefix("[\n") ? stdout.startIndex : stdout.range(of: "\n[\n").map({ stdout.index(after: $0.lowerBound) }) else {
+            throw AeroSpaceError(description: "unexpected list-windows output: \(stdout)")
         }
-        let focused = UInt32(answer.stdout[..<listStart].trimmingCharacters(in: .whitespacesAndNewlines))
-        let rows = try JSONSerialization.jsonObject(with: Data(answer.stdout[listStart...].utf8)) as? [[String: Any]] ?? []
+        var focused: UInt32?
+        var focusedWorkspace: String?
         var screenIndex: Int?
+        for line in answer.stdout[..<listStart].split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            if fields.count == 2 {
+                focusedWorkspace = String(fields[0])
+                screenIndex = Int(fields[1])
+            } else if let id = UInt32(line.trimmingCharacters(in: .whitespaces)) {
+                focused = id
+            }
+        }
+        let rows = try JSONSerialization.jsonObject(with: Data(answer.stdout[listStart...].utf8)) as? [[String: Any]] ?? []
         let windows: [WorkspaceWindow] = rows.compactMap { row in
             guard let id = (row["window-id"] as? NSNumber)?.uint32Value else { return nil }
-            if screenIndex == nil { screenIndex = (row["monitor-appkit-nsscreen-screens-id"] as? NSNumber)?.intValue }
             return WorkspaceWindow(
                 id: id,
                 pid: (row["app-pid"] as? NSNumber)?.int32Value ?? 0,
                 appName: row["app-name"] as? String ?? "",
                 title: row["window-title"] as? String ?? "",
-                layout: row["window-layout"] as? String ?? ""
+                layout: row["window-layout"] as? String ?? "",
+                workspace: row["workspace"] as? String ?? ""
             )
         }
-        return WorkspaceSnapshot(focused: focused, windows: windows, screenIndex: screenIndex)
+        return WindowSnapshot(focused: focused, focusedWorkspace: focusedWorkspace, screenIndex: screenIndex, windows: windows)
     }
 }

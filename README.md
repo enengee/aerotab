@@ -1,23 +1,41 @@
 # AeroTab
 
-A cmd-tab style window switcher for the [AeroSpace](https://github.com/nikitabobko/AeroSpace) window manager.
-It cycles through the windows of the focused AeroSpace workspace and shows live previews.
+A cmd-tab style window switcher for the [AeroSpace](https://github.com/nikitabobko/AeroSpace) window manager,
+with live previews. It has two modes:
+
+- **`alt-tab`:** the windows of the focused AeroSpace workspace.
+- **`cmd-tab`:** every window in every workspace, grouped one row per workspace. It replaces the macOS app switcher.
 
 | Key | Action |
 | --- | --- |
-| `alt-tab` | Open the switcher, or move the selection to the next window (most recently used first) |
-| `alt-shift-tab` | Same, in the opposite direction |
-| `←` / `→` (alt held) | Move the selection |
-| `w` (alt held) | Close the selected window |
-| `q` (alt held) | Quit the selected window's app |
-| `esc` (alt held) | Cancel |
-| release `alt` | Switch to the selected window |
+| `alt-tab` / `cmd-tab` | Open the switcher, or move the selection to the next window |
+| `alt-shift-tab` / `cmd-shift-tab` | Same, in the opposite direction |
+| `←` / `→` (modifier held) | Move the selection |
+| `` ` `` or `↓` (cmd held) | Jump to the first window of the next workspace |
+| `` shift-` `` or `↑` (cmd held) | Jump to the last window of the previous workspace |
+| `w` (modifier held) | Close the selected window |
+| `q` (modifier held) | Quit the selected window's app |
+| `esc` (modifier held) | Cancel |
+| release the modifier | Switch to the selected window |
 
-If you release alt within 100 ms the switch happens without showing the popup. A workspace with no windows does nothing.
-With one window the popup still appears.
+If you release the modifier within 100 ms the switch happens without showing the popup. With no windows nothing
+happens; with one window the popup still appears.
 
-## What happens when you release alt
+## Ordering
 
+- **`alt-tab`:** most recently used first. The first tap selects the window you used before the current one.
+- **`cmd-tab`:** the focused workspace's row comes first. Other rows follow in order of their most recently used
+  window, and windows inside a row are most recently used first. Each window is its own entry, even when several
+  belong to the same app. The first tap selects the window you used before the current one, wherever it is.
+  The selected window's row is lit and its workspace name turns bold white. Empty workspaces are not shown.
+
+While AeroTab runs it turns off the macOS cmd-tab and cmd-shift-tab shortcuts. It uses the private
+`CGSSetSymbolicHotKeyEnabled`, the same call AltTab uses, and turns them back on when it exits.
+
+## What happens when you release the modifier
+
+- **Selected window is in another workspace** (cmd-tab only): it gets focus, and AeroSpace switches that
+  workspace in on its monitor.
 - **Selected window is already focused:** nothing happens.
 - **Selected window is visible on screen** (at least half of it is uncovered): it gets focus.
 - **Selected window is hidden:** it is brought into view and focused, without hiding the window that had focus before.
@@ -37,9 +55,10 @@ example, two Chrome windows) lets macOS activate the app's other window, and Aer
 - **Long-running agent:** a single process with no Dock icon and no menu bar item. No shell scripts or processes are
   started per key press.
 - **Direct AeroSpace socket:** talks to `/tmp/bobko.aerospace-$USER.sock` using AeroSpace's own protocol (version 1),
-  instead of running the `aerospace` CLI. One `eval` gets the focused window and the workspace's windows (about 6 ms),
-  and one `eval` makes the switch.
-- **Event tap:** a `CGEventTap` intercepts alt-tab and sees alt being released in the same process.
+  instead of running the `aerospace` CLI. One `eval` gets the focused window, the focused workspace and the window
+  list (about 6 ms for one workspace), and one `eval` makes the switch.
+- **Event tap:** a `CGEventTap` intercepts alt-tab and cmd-tab and sees the modifier being released in the same
+  process.
 - **Recently-used order:** a persistent `aerospace subscribe focus-changed` connection keeps the order up to date.
 - **Previews:** ScreenCaptureKit captures thumbnails in parallel. Cached ones are shown immediately and fresh ones
   replace them as they arrive.

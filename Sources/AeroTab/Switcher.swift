@@ -1,8 +1,20 @@
 import AppKit
 import AeroTabCore
 
+enum SwitcherMode {
+    case workspace
+    case global
+
+    var modifier: CGEventFlags { self == .workspace ? .maskAlternate : .maskCommand }
+}
+
 @MainActor
 final class Switcher {
+    private enum Action {
+        case step(Int)
+        case jump(forward: Bool)
+    }
+
     private static let popupDelay: TimeInterval = 0.1
     private static let thumbnailPixels = CGSize(width: 800, height: 520)
 
@@ -11,12 +23,13 @@ final class Switcher {
     private let thumbnails = Thumbnails()
 
     private(set) var isActive = false
+    private(set) var mode = SwitcherMode.workspace
     private var generation = 0
-    private var items: [SwitcherItem]?
-    private var focused: UInt32?
-    private var screenIndex: Int?
+    private var backward = false
+    private var groups: [SwitcherGroup]?
+    private var snapshot: WindowSnapshot?
     private var selected = 0
-    private var pendingSteps = 0
+    private var pending: [Action] = []
     private var commitPending = false
     private var popupDue = false
     private var icons: [Int32: CGImage] = [:]
@@ -25,28 +38,21 @@ final class Switcher {
         self.history = history
     }
 
-    private func icon(for pid: Int32) -> CGImage? {
-        if let cached = icons[pid] { return cached }
-        guard let image = NSRunningApplication(processIdentifier: pid)?.icon else { return nil }
-        var rect = CGRect(x: 0, y: 0, width: 128, height: 128)
-        let rendered = image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
-        icons[pid] = rendered
-        return rendered
-    }
-
-    func begin(backward: Bool) {
+    func begin(_ mode: SwitcherMode, backward: Bool) {
         isActive = true
+        self.mode = mode
+        self.backward = backward
         generation += 1
         let current = generation
-        items = nil
-        focused = nil
+        groups = nil
+        snapshot = nil
         selected = 0
-        pendingSteps = backward ? -1 : 1
+        pending = []
         commitPending = false
         popupDue = false
 
         AeroSpace.queue.async {
-            let result = Result { (try AeroSpace.snapshot(), WindowStack.onScreen()) }
+            let result = Result { (try AeroSpace.snapshot(allWorkspaces: mode == .global), WindowStack.onScreen()) }
             DispatchQueue.main.async { self.loaded(current, result) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.popupDelay) {
@@ -57,12 +63,11 @@ final class Switcher {
     }
 
     func step(_ delta: Int) {
-        guard let items else {
-            pendingSteps += delta
-            return
-        }
-        selected = Self.wrap(selected + delta, items.count)
-        panel.select(selected)
+        perform(.step(delta))
+    }
+
+    func jumpWorkspace(forward: Bool) {
+        perform(.jump(forward: forward))
     }
 
     func cancel() {
@@ -73,7 +78,7 @@ final class Switcher {
         guard isActive else { return }
         isActive = false
         panel.hide()
-        if items == nil {
+        if groups == nil {
             commitPending = true
         } else {
             finishCommit()
@@ -96,98 +101,123 @@ final class Switcher {
         remove { $0.window.pid == pid }
     }
 
+    private var items: [SwitcherItem] { groups?.flatMap(\.items) ?? [] }
+
+    private var ring: Ring { Ring(groupSizes: groups?.map(\.items.count) ?? []) }
+
     private var selectedItem: SwitcherItem? {
-        guard let items, items.indices.contains(selected) else { return nil }
-        return items[selected]
+        let items = items
+        return items.indices.contains(selected) ? items[selected] : nil
     }
 
-    private func loaded(_ current: Int, _ result: Result<(WorkspaceSnapshot, [ScreenWindow]), Error>) {
+    private func perform(_ action: Action) {
+        guard groups != nil else {
+            pending.append(action)
+            return
+        }
+        switch action {
+        case .step(let delta): selected = ring.step(selected, by: delta)
+        case .jump(let forward): selected = ring.jumpWorkspace(from: selected, forward: forward)
+        }
+        panel.select(selected)
+    }
+
+    private func loaded(_ current: Int, _ result: Result<(WindowSnapshot, [ScreenWindow]), Error>) {
         guard current == generation else { return }
-        let snapshot: WorkspaceSnapshot
+        let snapshot: WindowSnapshot
         let stack: [ScreenWindow]
         switch result {
         case .success(let value): (snapshot, stack) = value
         case .failure(let error):
             log("snapshot: \(error)")
-            end()
-            return
+            return end()
         }
-        guard !snapshot.windows.isEmpty else {
-            end()
-            return
-        }
+        guard !snapshot.windows.isEmpty else { return end() }
 
         let frames = Dictionary(stack.map { ($0.id, $0.frame) }, uniquingKeysWith: { first, _ in first })
-        let ordered = recencyOrder(snapshot.windows, focused: snapshot.focused, history: history.recent)
-        items = ordered.map { window in
-            let frame = frames[window.id]
-            let aspect = frame.map { $0.height > 0 ? $0.width / $0.height : 1.6 } ?? 1.6
+        func item(_ window: WorkspaceWindow) -> SwitcherItem {
+            let aspect = frames[window.id].map { $0.height > 0 ? $0.width / $0.height : 1.6 } ?? 1.6
             return SwitcherItem(window: window, aspect: aspect, icon: icon(for: window.pid))
         }
-        focused = snapshot.focused
-        screenIndex = snapshot.screenIndex
-        selected = Self.wrap(pendingSteps, ordered.count)
-
-        if commitPending {
-            finishCommit()
-            return
+        let recent = history.recent
+        switch mode {
+        case .workspace:
+            let ordered = recencyOrder(snapshot.windows, focused: snapshot.focused, history: recent)
+            groups = [SwitcherGroup(label: nil, items: ordered.map(item))]
+        case .global:
+            groups = workspaceGroups(snapshot.windows, focusedWorkspace: snapshot.focusedWorkspace, focused: snapshot.focused, history: recent)
+                .map { SwitcherGroup(label: $0.workspace, items: $0.windows.map(item)) }
         }
+        self.snapshot = snapshot
+        selected = initialSelection(items.map(\.window), focused: snapshot.focused, history: recent, backward: backward)
+        let queued = pending
+        pending = []
+        queued.forEach(perform)
+
+        if commitPending { return finishCommit() }
         if popupDue { showPanel() }
-        thumbnails.capture(ordered.map(\.id), maxPixels: Self.thumbnailPixels) { [weak self] id, image in
+        thumbnails.capture(items.map(\.window.id), maxPixels: Self.thumbnailPixels) { [weak self] id, image in
             guard let self, current == self.generation, self.isActive else { return }
             self.panel.setThumbnail(image, for: id)
         }
     }
 
     private func showPanel() {
-        guard isActive, let items, !items.isEmpty, !panel.isVisible else { return }
-        panel.show(items, selected: selected, on: targetScreen) { thumbnails.cached($0) }
+        guard isActive, let groups, !groups.isEmpty, !panel.isVisible else { return }
+        panel.show(groups, selected: selected, on: targetScreen) { thumbnails.cached($0) }
     }
 
     private var targetScreen: NSScreen {
         let screens = NSScreen.screens
-        if let screenIndex, screens.indices.contains(screenIndex - 1) { return screens[screenIndex - 1] }
+        if let index = snapshot?.screenIndex, screens.indices.contains(index - 1) { return screens[index - 1] }
         return NSScreen.main ?? screens[0]
     }
 
     private func finishCommit() {
-        guard let item = selectedItem else { return end() }
-        let picked = item.window.id
-        let pid = item.window.pid
-        let focused = focused
-        let windows = items?.map(\.window) ?? []
+        guard let item = selectedItem, let snapshot else { return end() }
+        let picked = item.window
+        let sameWorkspace = items.map(\.window).filter { $0.workspace == picked.workspace }
         end()
         AeroSpace.queue.async {
-            let commands = commitCommands(picked: picked, focused: focused, windows: windows, stack: WindowStack.onScreen())
+            let commands = picked.workspace == snapshot.focusedWorkspace
+                ? commitCommands(picked: picked.id, focused: snapshot.focused, windows: sameWorkspace, stack: WindowStack.onScreen())
+                : ["focus --window-id \(picked.id)"]
             guard !commands.isEmpty else { return }
-            NativeFocus.focus(picked, pid: pid)
+            NativeFocus.focus(picked.id, pid: picked.pid)
             do { try AeroSpace.eval(commands) } catch { log("commit: \(error)") }
         }
     }
 
     private func remove(where predicate: (SwitcherItem) -> Bool) {
-        guard var items else { return }
-        for id in items.filter(predicate).map(\.window.id) { thumbnails.forget(id) }
-        items.removeAll(where: predicate)
-        self.items = items
-        if items.isEmpty { return end() }
+        guard let current = groups else { return }
+        for item in current.flatMap(\.items) where predicate(item) { thumbnails.forget(item.window.id) }
+        let remaining = current
+            .map { SwitcherGroup(label: $0.label, items: $0.items.filter { !predicate($0) }) }
+            .filter { !$0.items.isEmpty }
+        groups = remaining
+        if remaining.isEmpty { return end() }
         selected = min(selected, items.count - 1)
         if panel.isVisible {
             panel.hide()
-            panel.show(items, selected: selected, on: targetScreen) { thumbnails.cached($0) }
+            panel.show(remaining, selected: selected, on: targetScreen) { thumbnails.cached($0) }
         }
     }
 
     private func end() {
         isActive = false
         generation += 1
-        items = nil
+        groups = nil
+        snapshot = nil
         commitPending = false
         panel.hide()
     }
 
-    private static func wrap(_ value: Int, _ count: Int) -> Int {
-        guard count > 0 else { return 0 }
-        return ((value % count) + count) % count
+    private func icon(for pid: Int32) -> CGImage? {
+        if let cached = icons[pid] { return cached }
+        guard let image = NSRunningApplication(processIdentifier: pid)?.icon else { return nil }
+        var rect = CGRect(x: 0, y: 0, width: 128, height: 128)
+        let rendered = image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        icons[pid] = rendered
+        return rendered
     }
 }

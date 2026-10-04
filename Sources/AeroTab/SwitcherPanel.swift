@@ -7,26 +7,44 @@ struct SwitcherItem {
     let icon: CGImage?
 }
 
+struct SwitcherGroup {
+    let label: String?
+    let items: [SwitcherItem]
+}
+
 @MainActor
 final class SwitcherPanel {
     private enum Metrics {
         static let panelPadding: CGFloat = 18
         static let cellPadding: CGFloat = 8
         static let cellSpacing: CGFloat = 4
+        static let rowSpacing: CGFloat = 6
         static let headerHeight: CGFloat = 20
         static let headerGap: CGFloat = 6
         static let iconSize: CGFloat = 18
         static let placeholderIconSize: CGFloat = 56
+        static let minThumbHeight: CGFloat = 36
+        static let labelFontSize: CGFloat = 13
+        static let labelPadding: CGFloat = 12
         static let cornerRadius: CGFloat = 16
         static let cellCornerRadius: CGFloat = 10
+        static let rowCornerRadius: CGFloat = 12
         static let thumbnailCornerRadius: CGFloat = 5
+        static let minAspect: CGFloat = 0.7
+        static let maxAspect: CGFloat = 1.8
     }
 
     private struct Cell {
         let id: UInt32
+        let group: Int
         let frame: CGRect
         let thumbnail: CALayer
         let placeholder: CALayer
+    }
+
+    private struct Row {
+        let background: CALayer
+        let label: CATextLayer
     }
 
     private let panel: NSPanel
@@ -34,6 +52,8 @@ final class SwitcherPanel {
     private let grid: FlippedView
     private let highlight = CALayer()
     private var cells: [Cell] = []
+    private var rows: [Row] = []
+    private var selectedGroup: Int?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -72,52 +92,22 @@ final class SwitcherPanel {
         panel.alphaValue = 1
     }
 
-    func show(_ items: [SwitcherItem], selected: Int, on screen: NSScreen, thumbnail: (UInt32) -> CGImage?) {
+    func show(_ groups: [SwitcherGroup], selected: Int, on screen: NSScreen, thumbnail: (UInt32) -> CGImage?) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
 
-        let area = screen.visibleFrame
-        let thumbHeight = min(max(area.height * 0.18, 110), 200)
-        let maxRowWidth = area.width * 0.9 - 2 * Metrics.panelPadding
-        let cellHeight = Metrics.headerHeight + Metrics.headerGap + thumbHeight + 2 * Metrics.cellPadding
-
-        var rows: [[(item: SwitcherItem, width: CGFloat)]] = [[]]
-        var rowWidth: CGFloat = 0
-        for item in items {
-            let thumbWidth = min(max(thumbHeight * item.aspect, thumbHeight * 0.7), thumbHeight * 1.8)
-            let width = thumbWidth + 2 * Metrics.cellPadding
-            let added = rows[rows.count - 1].isEmpty ? width : width + Metrics.cellSpacing
-            if rowWidth + added > maxRowWidth, !rows[rows.count - 1].isEmpty {
-                rows.append([(item, width)])
-                rowWidth = width
-            } else {
-                rows[rows.count - 1].append((item, width))
-                rowWidth += added
-            }
-        }
-
-        let rowWidths = rows.map { row in
-            row.reduce(0) { $0 + $1.width } + Metrics.cellSpacing * CGFloat(max(row.count - 1, 0))
-        }
-        let contentWidth = rowWidths.max() ?? 0
-        let contentHeight = cellHeight * CGFloat(rows.count) + Metrics.cellSpacing * CGFloat(rows.count - 1)
-        let size = CGSize(width: contentWidth + 2 * Metrics.panelPadding, height: contentHeight + 2 * Metrics.panelPadding)
-
         grid.layer?.sublayers = nil
-        grid.layer?.addSublayer(highlight)
         cells = []
+        rows = []
+        selectedGroup = nil
+
+        let area = screen.visibleFrame
         let scale = screen.backingScaleFactor
-        var y = Metrics.panelPadding
-        for (rowIndex, row) in rows.enumerated() {
-            var x = Metrics.panelPadding + (contentWidth - rowWidths[rowIndex]) / 2
-            for (item, width) in row {
-                let frame = CGRect(x: x, y: y, width: width, height: cellHeight)
-                cells.append(makeCell(item, frame: frame, scale: scale, image: thumbnail(item.window.id)))
-                x += width + Metrics.cellSpacing
-            }
-            y += cellHeight + Metrics.cellSpacing
-        }
+        let content = groups.count == 1 && groups[0].label == nil
+            ? layoutWrapped(groups[0].items, area: area, scale: scale, thumbnail: thumbnail)
+            : layoutRows(groups, area: area, scale: scale, thumbnail: thumbnail)
+        let size = CGSize(width: content.width + 2 * Metrics.panelPadding, height: content.height + 2 * Metrics.panelPadding)
 
         let origin = CGPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2)
         panel.setFrame(CGRect(origin: origin, size: size), display: false)
@@ -133,6 +123,12 @@ final class SwitcherPanel {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         highlight.frame = cells[index].frame
+        let group = cells[index].group
+        if group != selectedGroup, rows.indices.contains(group) {
+            if let previous = selectedGroup, rows.indices.contains(previous) { style(rows[previous], selected: false) }
+            style(rows[group], selected: true)
+            selectedGroup = group
+        }
         CATransaction.commit()
     }
 
@@ -149,7 +145,130 @@ final class SwitcherPanel {
         panel.orderOut(nil)
     }
 
-    private func makeCell(_ item: SwitcherItem, frame: CGRect, scale: CGFloat, image: CGImage?) -> Cell {
+    private func layoutWrapped(_ items: [SwitcherItem], area: CGRect, scale: CGFloat, thumbnail: (UInt32) -> CGImage?) -> CGSize {
+        let thumbHeight = baseThumbHeight(area)
+        let maxRowWidth = area.width * 0.9 - 2 * Metrics.panelPadding
+        let cellHeight = Self.cellHeight(thumbHeight)
+
+        var lines: [[(item: SwitcherItem, width: CGFloat)]] = [[]]
+        var lineWidth: CGFloat = 0
+        for item in items {
+            let width = Self.cellWidth(item, thumbHeight: thumbHeight)
+            let added = lines[lines.count - 1].isEmpty ? width : width + Metrics.cellSpacing
+            if lineWidth + added > maxRowWidth, !lines[lines.count - 1].isEmpty {
+                lines.append([(item, width)])
+                lineWidth = width
+            } else {
+                lines[lines.count - 1].append((item, width))
+                lineWidth += added
+            }
+        }
+
+        let lineWidths = lines.map(Self.rowWidth)
+        let contentWidth = lineWidths.max() ?? 0
+        grid.layer?.addSublayer(highlight)
+        var y = Metrics.panelPadding
+        for (lineIndex, line) in lines.enumerated() {
+            var x = Metrics.panelPadding + (contentWidth - lineWidths[lineIndex]) / 2
+            for (item, width) in line {
+                let frame = CGRect(x: x, y: y, width: width, height: cellHeight)
+                cells.append(makeCell(item, group: 0, frame: frame, scale: scale, image: thumbnail(item.window.id)))
+                x += width + Metrics.cellSpacing
+            }
+            y += cellHeight + Metrics.cellSpacing
+        }
+        let contentHeight = cellHeight * CGFloat(lines.count) + Metrics.cellSpacing * CGFloat(lines.count - 1)
+        return CGSize(width: contentWidth, height: contentHeight)
+    }
+
+    private func layoutRows(_ groups: [SwitcherGroup], area: CGRect, scale: CGFloat, thumbnail: (UInt32) -> CGImage?) -> CGSize {
+        let font = NSFont.systemFont(ofSize: Metrics.labelFontSize, weight: .bold)
+        let labelTextWidth = groups.map { (($0.label ?? "") as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        let labelWidth = min(max(ceil(labelTextWidth) + 2 * Metrics.labelPadding, 60), 200)
+
+        let maxWidth = area.width * 0.92 - 2 * Metrics.panelPadding - labelWidth
+        let maxHeight = area.height * 0.9 - 2 * Metrics.panelPadding - Metrics.rowSpacing * CGFloat(groups.count - 1)
+        let chrome = Self.cellHeight(0)
+        var thumbHeight = min(baseThumbHeight(area), maxHeight / CGFloat(groups.count) - chrome)
+        for group in groups {
+            let factors = group.items.reduce(0) { $0 + Self.aspectFactor($1) }
+            let fixed = CGFloat(group.items.count) * 2 * Metrics.cellPadding + Metrics.cellSpacing * CGFloat(group.items.count - 1)
+            thumbHeight = min(thumbHeight, (maxWidth - fixed) / factors)
+        }
+        thumbHeight = max(floor(thumbHeight), Metrics.minThumbHeight)
+        let cellHeight = Self.cellHeight(thumbHeight)
+
+        let rowWidths = groups.map { group in
+            Self.rowWidth(group.items.map { ($0, Self.cellWidth($0, thumbHeight: thumbHeight)) })
+        }
+        let contentWidth = labelWidth + (rowWidths.max() ?? 0)
+
+        var y = Metrics.panelPadding
+        for group in groups {
+            let rowFrame = CGRect(x: Metrics.panelPadding, y: y, width: contentWidth, height: cellHeight)
+            let background = CALayer()
+            background.frame = rowFrame.insetBy(dx: -4, dy: -2)
+            background.cornerRadius = Metrics.rowCornerRadius
+            let label = CATextLayer()
+            label.frame = CGRect(x: rowFrame.minX + Metrics.labelPadding, y: rowFrame.midY - 9,
+                                 width: labelWidth - 2 * Metrics.labelPadding, height: 18)
+            label.string = group.label
+            label.font = font
+            label.fontSize = Metrics.labelFontSize
+            label.truncationMode = .end
+            label.contentsScale = scale
+            let row = Row(background: background, label: label)
+            style(row, selected: false)
+            grid.layer?.addSublayer(background)
+            grid.layer?.addSublayer(label)
+            rows.append(row)
+            y += cellHeight + Metrics.rowSpacing
+        }
+        grid.layer?.addSublayer(highlight)
+
+        y = Metrics.panelPadding
+        for (groupIndex, group) in groups.enumerated() {
+            var x = Metrics.panelPadding + labelWidth
+            for item in group.items {
+                let width = Self.cellWidth(item, thumbHeight: thumbHeight)
+                let frame = CGRect(x: x, y: y, width: width, height: cellHeight)
+                cells.append(makeCell(item, group: groupIndex, frame: frame, scale: scale, image: thumbnail(item.window.id)))
+                x += width + Metrics.cellSpacing
+            }
+            y += cellHeight + Metrics.rowSpacing
+        }
+        let contentHeight = cellHeight * CGFloat(groups.count) + Metrics.rowSpacing * CGFloat(groups.count - 1)
+        return CGSize(width: contentWidth, height: contentHeight)
+    }
+
+    private func style(_ row: Row, selected: Bool) {
+        row.background.backgroundColor = selected ? NSColor.white.withAlphaComponent(0.1).cgColor : nil
+        row.background.borderColor = selected ? NSColor.white.withAlphaComponent(0.18).cgColor : nil
+        row.background.borderWidth = selected ? 1 : 0
+        row.label.foregroundColor = NSColor.white.withAlphaComponent(selected ? 1 : 0.45).cgColor
+    }
+
+    private func baseThumbHeight(_ area: CGRect) -> CGFloat {
+        min(max(area.height * 0.18, 110), 200)
+    }
+
+    private static func aspectFactor(_ item: SwitcherItem) -> CGFloat {
+        min(max(item.aspect, Metrics.minAspect), Metrics.maxAspect)
+    }
+
+    private static func cellWidth(_ item: SwitcherItem, thumbHeight: CGFloat) -> CGFloat {
+        aspectFactor(item) * thumbHeight + 2 * Metrics.cellPadding
+    }
+
+    private static func cellHeight(_ thumbHeight: CGFloat) -> CGFloat {
+        Metrics.headerHeight + Metrics.headerGap + thumbHeight + 2 * Metrics.cellPadding
+    }
+
+    private static func rowWidth(_ row: [(item: SwitcherItem, width: CGFloat)]) -> CGFloat {
+        row.reduce(0) { $0 + $1.width } + Metrics.cellSpacing * CGFloat(max(row.count - 1, 0))
+    }
+
+    private func makeCell(_ item: SwitcherItem, group: Int, frame: CGRect, scale: CGFloat, image: CGImage?) -> Cell {
         let inner = frame.insetBy(dx: Metrics.cellPadding, dy: Metrics.cellPadding)
 
         let icon = CALayer()
@@ -171,18 +290,18 @@ final class SwitcherPanel {
         title.contentsScale = scale
 
         let thumbnail = CALayer()
-        thumbnail.frame = CGRect(x: inner.minX, y: inner.minY + Metrics.headerHeight + Metrics.headerGap,
-                                 width: inner.width, height: inner.maxY - (inner.minY + Metrics.headerHeight + Metrics.headerGap))
+        let thumbTop = inner.minY + Metrics.headerHeight + Metrics.headerGap
+        thumbnail.frame = CGRect(x: inner.minX, y: thumbTop, width: inner.width, height: inner.maxY - thumbTop)
         thumbnail.contentsGravity = .resizeAspect
         thumbnail.contentsScale = scale
         thumbnail.cornerRadius = Metrics.thumbnailCornerRadius
         thumbnail.masksToBounds = true
         thumbnail.contents = image
 
+        let placeholderSize = min(Metrics.placeholderIconSize, thumbnail.bounds.height * 0.7)
         let placeholder = CALayer()
-        placeholder.frame = CGRect(x: thumbnail.bounds.midX - Metrics.placeholderIconSize / 2,
-                                   y: thumbnail.bounds.midY - Metrics.placeholderIconSize / 2,
-                                   width: Metrics.placeholderIconSize, height: Metrics.placeholderIconSize)
+        placeholder.frame = CGRect(x: thumbnail.bounds.midX - placeholderSize / 2, y: thumbnail.bounds.midY - placeholderSize / 2,
+                                   width: placeholderSize, height: placeholderSize)
         placeholder.contents = item.icon
         placeholder.contentsGravity = .resizeAspect
         placeholder.contentsScale = scale
@@ -193,7 +312,7 @@ final class SwitcherPanel {
         grid.layer?.addSublayer(icon)
         grid.layer?.addSublayer(title)
         grid.layer?.addSublayer(thumbnail)
-        return Cell(id: item.window.id, frame: frame, thumbnail: thumbnail, placeholder: placeholder)
+        return Cell(id: item.window.id, group: group, frame: frame, thumbnail: thumbnail, placeholder: placeholder)
     }
 
     private static func roundedMask(size: CGSize, radius: CGFloat) -> NSImage {
