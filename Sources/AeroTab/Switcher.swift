@@ -179,12 +179,19 @@ final class Switcher {
         let sameWorkspace = items.map(\.window).filter { $0.workspace == picked.workspace }
         end()
         AeroSpace.queue.async {
-            let commands = picked.workspace == snapshot.focusedWorkspace
-                ? commitCommands(picked: picked.id, focused: snapshot.focused, windows: sameWorkspace, stack: WindowStack.onScreen())
-                : ["focus --window-id \(picked.id)"]
-            guard !commands.isEmpty else { return }
-            NativeFocus.focus(picked.id, pid: picked.pid)
-            do { try AeroSpace.eval(commands) } catch { log("commit: \(error)") }
+            do {
+                if picked.workspace == snapshot.focusedWorkspace {
+                    let commands = commitCommands(picked: picked.id, focused: snapshot.focused, windows: sameWorkspace, stack: WindowStack.onScreen())
+                    guard !commands.isEmpty else { return }
+                    NativeFocus.focus(picked.id, pid: picked.pid)
+                    try AeroSpace.eval(commands)
+                } else {
+                    try AeroSpace.eval(["summon-workspace -- '\(picked.workspace)'", "focus --window-id \(picked.id)"])
+                    NativeFocus.focus(picked.id, pid: picked.pid)
+                }
+            } catch {
+                log("commit: \(error)")
+            }
         }
     }
 

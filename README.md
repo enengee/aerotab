@@ -34,8 +34,8 @@ While AeroTab runs it turns off the macOS cmd-tab and cmd-shift-tab shortcuts. I
 
 ## What happens when you release the modifier
 
-- **Selected window is in another workspace** (cmd-tab only): it gets focus, and AeroSpace switches that
-  workspace in on its monitor.
+- **Selected window is in another workspace** (cmd-tab only): that workspace is brought to the focused monitor
+  with `aerospace summon-workspace`, even if it was showing on another monitor, and the window gets focus.
 - **Selected window is already focused:** nothing happens.
 - **Selected window is visible on screen** (at least half of it is uncovered): it gets focus.
 - **Selected window is hidden:** it is brought into view and focused, without hiding the window that had focus before.
